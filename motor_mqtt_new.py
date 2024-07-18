@@ -11,6 +11,9 @@ MQTT_BROKER_IP = '192.168.0.105'
 # Initialize motor, replace 'COM_PORT' with your actual COM port, and 'ADDR' with your device address       
 motor = linearMotor(COM_PORT, ADDR)
 TOLERANCE = 0.06  # Define a tolerance for considering the target reached
+STABILITY_CHECKS = 5  # Number of consecutive checks to confirm the target is reached
+CHECK_INTERVAL = 0.1  # Interval between stability checks in seconds
+
 
 # Shared state
 latest_command = {
@@ -45,21 +48,24 @@ def on_connect(client, userdata, flags, rc):
 
 def on_message(client, userdata, msg):
     global latest_command
-    command = msg.payload.decode("utf-8")
-    print(f"Received command: {command}")
-
-    with lock:
-        if command == "STOP":
-            latest_command['type'] = "STOP"
-            latest_command['value'] = None
-        else:
-            latest_command['type'] = "MOVE"
-            latest_command['value'] = float(command)
+    try:
+        command = msg.payload.decode("utf-8")
+        print(f"Received command: {command}")
+        with lock:
+            if command == "STOP":
+                latest_command['type'] = "STOP"
+                latest_command['value'] = None
+            else:
+                latest_command['type'] = "MOVE"
+                latest_command['value'] = float(command)
+    except Exception as e:
+        print(f"Failed to parse message: {msg.payload.decode('utf-8')}. Error: {e}")
 
 def handle_motor_movement(client):
     global latest_command
 
     current_target = None
+    stability_counter = 0
 
     while True:
         with lock:
@@ -73,31 +79,37 @@ def handle_motor_movement(client):
             current_distance = get_siko_distance()
             distance_to_move = current_target - current_distance
             move_motor_by_distance(distance_to_move)
+            client.publish("rail/motor_status", "moving")
+            print("Motor is moving...")
 
         elif command_type == "STOP":
             print("Received stop command. Stopping motor.")
             stop_motor()
+            client.publish("rail/motor_status", "stopped")
             current_target = None
 
+        # Get the updated siko distance
+        siko_distance = get_siko_distance()
+        # Publish the siko distance
+        client.publish("rail/siko_distance", siko_distance)
+        print(f"Published siko distance: {siko_distance}")
+
         if current_target is not None:
-            # Periodically check if the motor has stopped
-            if check_motor_stopped():
-                # Get the updated siko distance
-                siko_distance = get_siko_distance()
-                # Publish the siko distance
-                client.publish("rail/siko_distance", siko_distance)
-                print(f"Published siko distance: {siko_distance}")
 
-                if abs(siko_distance - current_target) <= TOLERANCE:
-                    print("Motor has reached the target within tolerance.")
-                    client.publish("rail/motor_status", "stopped")
-                    current_target = None
-                else:
-                    # Adjust the motor position again if it's not within tolerance
-                    distance_to_move = current_target - siko_distance
-                    move_motor_by_distance(distance_to_move)
+            if stability_counter >= STABILITY_CHECKS:
+                print("Motor has reached the target within tolerance.")
+                client.publish("rail/motor_status", "stopped")
+                current_target = None
+            elif abs(siko_distance - current_target) <= TOLERANCE:
+                stability_counter += 1
+            else:
+                stability_counter = 0
+                # Adjust the motor position again if it's not within tolerance
+                distance_to_move = current_target - siko_distance
+                move_motor_by_distance(distance_to_move)
 
-        time.sleep(0.1)  # Adjust sleep time as needed to avoid busy-waiting
+        time.sleep(CHECK_INTERVAL)  # Adjust sleep time as needed to avoid busy-waiting
+
 
 def run_motor_control():
     client = mqtt.Client()
