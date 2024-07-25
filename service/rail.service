@@ -1,0 +1,12 @@
+[Unit]
+Description=motor control for Rail Service
+After=multi-user.target
+
+[Service]
+User=test01
+WorkingDirectory=/path/to/your/script
+ExecStart=/usr/bin/python3 /path/to/your/script/my_script.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
